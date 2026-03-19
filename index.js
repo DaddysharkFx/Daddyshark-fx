@@ -1,4 +1,4 @@
-// ===== IMPORTS =====
+console.log("MY REAL BOT STARTED");// ===== IMPORTS =====
 const express=require("express");
 const fs=require("fs");
 const app=express();
