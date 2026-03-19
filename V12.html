@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body{background:#0a0e1a;color:#fff;font-family:Arial;padding:12px}
+.card{background:#1f2937;padding:12px;margin-bottom:12px;border-radius:10px}
+.buy{color:#10b981}.sell{color:#ef4444}.wait{color:#9ca3af}
+button{padding:10px;background:#06b6d4;border:none;color:#fff;width:100%;margin-top:8px}
+input{padding:10px;width:100%;margin-top:5px;background:#111827;color:#fff;border:1px solid #374151}
+</style>
+</head>
+
+<body>
+
+<div class="card">
+<input id="token" placeholder="Token">
+<input id="amount" type="number" value="1">
+<button onclick="connect()">Connect</button>
+<button onclick="sniper()">SNIPER ENTRY</button>
+<p id="status">Not Connected</p>
+<p id="balance"></p>
+</div>
+
+<div class="card">
+<p id="mode">Mode:-</p>
+<p id="market">Market:-</p>
+<p id="signal" class="wait">WAIT</p>
+<p>Confidence: <span id="conf">0</span>%</p>
+<p>Threshold: <span id="th">0</span>%</p>
+<p>PnL: $<span id="pnl">0</span></p>
+<p>Wins: <span id="wins">0</span> | Loss: <span id="losses">0</span></p>
+</div>
+
+<div class="card"><canvas id="chart"></canvas></div>
+
+<script>
+
+const APP_ID=1089,SYMBOL="R_100";
+
+// ===== MEMORY =====
+let memory = JSON.parse(localStorage.getItem("V14_MEMORY")) || {
+totalWins:0,totalLosses:0,totalPnL:0,bestThreshold:65
+};
+
+// ===== CORE =====
+let ws,p=[],d=[],cid=null,bal=0,pnl=0;
+let last=0,lossStreak=0,trades=0;
+
+// stats
+let wins=0,losses=0,digitLoss=0,digitEnabled=true;
+
+// adaptive
+let baseStake=1,currentStake=1;
+let CONF_THRESHOLD=memory.bestThreshold;
+
+// control
+let buffer=[],currentMode="TREND";
+let dynamicCool=8000;
+
+// sniper
+let sniperBuffer=[];
+
+// session
+let sessionStart=Date.now();
+let maxSessionTime=60*60*1000;
+
+// trade control
+let tradeHistory=[];
+
+// settings
+let sl=-50,tp=100,maxLoss=3,maxTrades=25;
+
+// ===== CONNECT =====
+function connect(){
+let t=token.value;
+
+baseStake=parseFloat(amount.value||1);
+currentStake=baseStake;
+
+ws=new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
+
+ws.onopen=()=>ws.send(JSON.stringify({authorize:t}));
+
+ws.onmessage=m=>{
+let x=JSON.parse(m.data);
+if(x.error)return;
+
+if(x.msg_type==="authorize"){
+bal=x.authorize.balance;
+status.innerText="Connected";
+balance.innerText="Balance: $"+bal;
+ws.send(JSON.stringify({ticks:SYMBOL}));
+th.innerText=CONF_THRESHOLD;
+}
+
+if(x.msg_type==="tick"){
+let pr=x.tick.quote;
+
+p.push(pr); if(p.length>80)p.shift();
+
+let dg=parseInt(pr.toString().slice(-1));
+d.push(dg); if(d.length>120)d.shift();
+
+chartUpdate();
+brain();
+}
+
+if(x.msg_type==="buy"){
+cid=x.buy.contract_id;
+trades++;
+
+ws.send(JSON.stringify({
+proposal_open_contract:1,
+contract_id:cid,
+subscribe:1
+}));
+}
+
+if(x.msg_type==="proposal_open_contract"){
+if(x.proposal_open_contract.is_sold){
+
+let prof=x.proposal_open_contract.profit;
+pnl+=prof;
+
+pnlEl.innerText=pnl.toFixed(2);
+
+// stats
+if(prof>0){
+wins++;
+lossStreak=0;
+currentStake*=1.1;
+dynamicCool=8000;
+}else{
+losses++;
+lossStreak++;
+currentStake*=0.7;
+dynamicCool=12000;
+}
+
+// clamp
+if(currentStake<baseStake*0.5) currentStake=baseStake*0.5;
+if(currentStake>baseStake*1.5) currentStake=baseStake*1.5;
+
+winsEl.innerText=wins;
+lossEl.innerText=losses;
+
+cid=null;
+
+// ===== MEMORY LEARNING =====
+memory.totalWins += wins;
+memory.totalLosses += losses;
+memory.totalPnL += pnl;
+
+let wr = memory.totalWins/(memory.totalWins+memory.totalLosses||1);
+
+if(wr<0.5) memory.bestThreshold=75;
+else if(wr>0.7) memory.bestThreshold=60;
+else memory.bestThreshold=65;
+
+localStorage.setItem("V14_MEMORY",JSON.stringify(memory));
+
+// protections
+if(lossStreak>=maxLoss||pnl<=sl||pnl>=tp||trades>=maxTrades){
+alert("Session Ended");
+ws.close();
+}
+}
+}
+};
+}
+
+// ===== MARKET STATE =====
+function marketState(){
+let recent=p.slice(-20);
+let range=Math.max(...recent)-Math.min(...recent);
+
+if(range<0.2) return "DEAD";
+if(range>1.5) return "CHAOTIC";
+return "NORMAL";
+}
+
+// ===== INDICATORS =====
+function rsi(){
+if(p.length<15)return 50;
+let g=0,l=0;
+for(let i=p.length-14;i<p.length;i++){
+let diff=p[i]-p[i-1];
+if(diff>0)g+=diff; else l-=diff;
+}
+let rs=g/(l||1);
+return 100-(100/(1+rs));
+}
+
+function trend(){
+let s=p.slice(-10),l=p.slice(-30);
+let a=s.reduce((x,y)=>x+y)/s.length;
+let b=l.reduce((x,y)=>x+y)/l.length;
+return {dir:a>b?"UP":a<b?"DOWN":"FLAT",strength:Math.abs(a-b)};
+}
+
+function volatility(){
+let r=p.slice(-15);
+return (Math.max(...r)-Math.min(...r))/p[p.length-1];
+}
+
+// ===== DIGIT =====
+function digitSignal(){
+if(!digitEnabled) return {type:"WAIT",score:0};
+
+let count=Array(10).fill(0);
+d.forEach(x=>count[x]++);
+
+let even=count[0]+count[2]+count[4]+count[6]+count[8];
+let odd=count[1]+count[3]+count[5]+count[7]+count[9];
+
+if(Math.abs(even-odd)>18){
+return {
+type:"DIGIT",
+contract:even>odd?"DIGITEVEN":"DIGITODD",
+score:70
+};
+}
+
+return {type:"WAIT",score:0};
+}
+
+// ===== SCORE =====
+function scoreEngine(sig,t,r,v){
+
+let score=0;
+
+if(t.strength>0.2) score+=25;
+if(sig==="CALL" && r<40) score+=20;
+if(sig==="PUT" && r>60) score+=20;
+if(v>0.004) score+=20;
+
+if(score<40) return 0;
+
+let m=p[p.length-1]-p[p.length-5];
+if(sig==="CALL" && m>0) score+=15;
+if(sig==="PUT" && m<0) score+=15;
+
+return score;
+}
+
+// ===== BRAIN =====
+function brain(){
+
+if(p.length<40)return;
+
+// session timer
+if(Date.now()-sessionStart > maxSessionTime){
+signal.innerText="SESSION END";
+signal.className="wait";
+return;
+}
+
+let state=marketState();
+market.innerText="Market:"+state;
+
+if(state==="DEAD"||state==="CHAOTIC"){
+signal.innerText="WAIT";
+signal.className="wait";
+return;
+}
+
+let r=rsi(),t=trend(),v=volatility();
+
+let raw="WAIT";
+currentMode="TREND";
+
+if(t.dir==="UP" && r<45) raw="CALL";
+if(t.dir==="DOWN" && r>55) raw="PUT";
+
+if(t.strength<0.1 || v<0.003) raw="WAIT";
+
+let conf=scoreEngine(raw,t,r,v);
+
+let ds=digitSignal();
+if(ds.type==="DIGIT" && conf<60){
+raw=ds.contract;
+conf=ds.score;
+currentMode="DIGIT";
+}
+
+buffer.push(raw);
+if(buffer.length>3) buffer.shift();
+
+let sig = buffer.every(x=>x===raw)?raw:"WAIT";
+
+// UI
+signal.innerText=sig;
+signal.className=(sig==="CALL"||sig.includes("EVEN"))?"buy":
+(sig==="PUT"||sig.includes("ODD"))?"sell":"wait";
+
+confEl.innerText=conf;
+mode.innerText="Mode:"+currentMode;
+
+// ===== AUTO SNIPER =====
+if(sig==="WAIT"){
+sniperBuffer=[];
+return;
+}
+
+sniperBuffer.push(sig);
+if(sniperBuffer.length>4) sniperBuffer.shift();
+
+let stable = sniperBuffer.length===4 && sniperBuffer.every(x=>x===sig);
+
+if(conf < 70) return;
+
+if(state==="DEAD" || state==="CHAOTIC") return;
+
+let move = p[p.length-1] - p[p.length-3];
+
+if(sig==="CALL" && move<=0) return;
+if(sig==="PUT" && move>=0) return;
+
+if(stable){
+exec(sig);
+sniperBuffer=[];
+}
+}
+
+// ===== EXEC =====
+function exec(sig){
+
+let now=Date.now();
+
+// overtrading protection
+tradeHistory.push(now);
+if(tradeHistory.length>10) tradeHistory.shift();
+
+if(tradeHistory.length>=5){
+let speed = tradeHistory[tradeHistory.length-1] - tradeHistory[0];
+if(speed < 60000) return;
+}
+
+if(cid||now-last<dynamicCool||lossStreak>=maxLoss) return;
+
+let move=Math.abs(p[p.length-1]-p[p.length-2]);
+if(move<0.08) return;
+
+if(currentStake>bal*0.1){
+alert("Stake too high");
+return;
+}
+
+last=now;
+
+ws.send(JSON.stringify({
+buy:1,
+price:currentStake,
+parameters:{
+amount:currentStake,
+basis:"stake",
+contract_type:sig,
+currency:"USD",
+duration:(sig==="CALL"||sig==="PUT")?5:1,
+duration_unit:"t",
+symbol:SYMBOL
+}
+}));
+}
+
+// ===== MANUAL SNIPER =====
+function sniper(){
+
+let conf=parseFloat(confEl.innerText);
+let sig=signal.innerText;
+let state=market.innerText;
+
+if(conf<70){alert("Low confidence");return;}
+if(state.includes("DEAD")||state.includes("CHAOTIC")){alert("Bad market");return;}
+if(sig==="WAIT"){alert("No signal");return;}
+
+exec(sig);
+}
+
+// ===== CHART =====
+let chart=new Chart(document.getElementById("chart"),{
+type:"line",
+data:{labels:[],datasets:[{data:[]}]},
+options:{animation:false}
+});
+
+function chartUpdate(){
+chart.data.labels.push("");
+chart.data.datasets[0].data=p;
+
+if(chart.data.labels.length>50)
+chart.data.labels.shift();
+
+chart.update();
+}
+
+</script>
+
+</body>
+</html>
