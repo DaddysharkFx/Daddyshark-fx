@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Daddyshark FX</title>
+<style>
+body { background:#0a0e1a; color:white; text-align:center; font-family:Arial; }
+input, button { padding:10px; margin:10px; width:80%; border-radius:5px; }
+button { background:#00f7ff; border:none; }
+</style>
+</head>
+
+<body>
+
+<h2>Daddyshark FX Bot</h2>
+
+<input id="token" placeholder="Enter API Token" />
+<br>
+<button onclick="connect()">Connect</button>
+
+<p id="status">Disconnected</p>
+
+<script>
+function connect(){
+  fetch("/connect", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      token: document.getElementById("token").value
+    })
+  });
+
+  document.getElementById("status").innerText = "Connected";
+}
+</script>
+
+</body>
+</html>
